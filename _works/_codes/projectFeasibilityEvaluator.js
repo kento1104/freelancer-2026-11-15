@@ -3,6 +3,11 @@ import { PROPOSAL_MODELS } from "./proposalMaker.js";
 import { waitForModelRequestSlot } from "./AI_ProjectThinker.js";
 
 const FEASIBILITY_SCORES = Array.from({ length: 11 }, (_, index) => index * 10);
+const RETRYABLE_HTTP_STATUSES = new Set([500, 502, 503, 504]);
+
+export function isRetryableFeasibilityError(error) {
+    return RETRYABLE_HTTP_STATUSES.has(error?.status);
+}
 
 export function parseFeasibilityAssessment(text) {
     if (typeof text !== "string") {
@@ -59,7 +64,12 @@ ${JSON.stringify({
 
     const client = new GoogleGenerativeAI(profile.conclusionAiKey.trim());
     let responseText;
-    for (const modelName of PROPOSAL_MODELS) {
+    let lastRetryableError;
+    const unavailableModels = new Set();
+    for (let attempt = 0; attempt < PROPOSAL_MODELS.length * 2; attempt++) {
+        const modelName = PROPOSAL_MODELS[attempt % PROPOSAL_MODELS.length];
+        if (unavailableModels.has(modelName)) continue;
+
         try {
             const model = client.getGenerativeModel({ model: modelName });
             await waitForModelRequestSlot(modelName, profile.conclusionAiKey.trim());
@@ -67,12 +77,24 @@ ${JSON.stringify({
             responseText = result.response.text();
             break;
         } catch (error) {
-            if (error.status !== 404 || modelName === PROPOSAL_MODELS.at(-1)) {
-                throw error;
+            if (error.status === 404) {
+                unavailableModels.add(modelName);
+                continue;
             }
+            if (isRetryableFeasibilityError(error)) {
+                lastRetryableError = error;
+                console.warn(
+                    `Gemini feasibility model "${modelName}" returned HTTP ${error.status}; trying another attempt.`
+                );
+                continue;
+            }
+            throw error;
         }
     }
-    if (!responseText) throw new Error("No configured Gemini model could assess project feasibility.");
+    if (!responseText) {
+        if (lastRetryableError) throw lastRetryableError;
+        throw new Error("No configured Gemini model could assess project feasibility.");
+    }
 
     return parseFeasibilityAssessment(responseText);
 }

@@ -139,7 +139,7 @@ const MY_EVENTS_FIELDS = [
     { key: "Project ID", aliases: ["Project ID"] },
     { key: "Project URL", aliases: ["Project URL"] },
     { key: "Account", aliases: ["Account", "username", "acccount"] },
-    { key: "Bid Status", aliases: ["Bid Status"] },
+    { key: "Bid Status", aliases: ["Bid Status", "bid"] },
     { key: "Status Reason", aliases: ["Status Reason"] },
     { key: "Proposal", aliases: ["Proposal"] },
 ];
@@ -159,6 +159,7 @@ const bidAttemptsById = new Map();
 const selectionCursors = {};
 const selectionCursorPath = path.join(SERVER_ROOT, ".autobid-cursors.json");
 const selectionLocks = new Map();
+let selectionCursorWriteQueue = Promise.resolve();
 
 const globalSheetId = SHEET_ID;
 const globalAuth = auth;
@@ -380,17 +381,46 @@ async function initializeProjectSelectionState() {
     }
 }
 
-function saveSelectionCursors() {
-    const temporaryPath = `${selectionCursorPath}.tmp`;
-    fs.writeFileSync(temporaryPath, JSON.stringify(selectionCursors), "utf8");
-    fs.renameSync(temporaryPath, selectionCursorPath);
+async function renameSelectionCursorFile(temporaryPath) {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            await fs.promises.rename(temporaryPath, selectionCursorPath);
+            return;
+        } catch (error) {
+            if (!["EBUSY", "EPERM"].includes(error.code) || attempt >= 4) {
+                throw error;
+            }
+            await new Promise(resolve => setTimeout(resolve, 25 * (attempt + 1)));
+        }
+    }
 }
 
-function getSelectionCursor(username) {
+function saveSelectionCursors() {
+    const saveOperation = selectionCursorWriteQueue.then(async () => {
+        const temporaryPath = `${selectionCursorPath}.${process.pid}.${randomUUID()}.tmp`;
+        try {
+            await fs.promises.writeFile(temporaryPath, JSON.stringify(selectionCursors), "utf8");
+            await renameSelectionCursorFile(temporaryPath);
+        } catch (error) {
+            try {
+                await fs.promises.unlink(temporaryPath);
+            } catch (cleanupError) {
+                if (cleanupError.code !== "ENOENT") {
+                    console.error("Could not remove temporary auto-bid cursor file:", cleanupError);
+                }
+            }
+            throw error;
+        }
+    });
+    selectionCursorWriteQueue = saveOperation.then(() => undefined, () => undefined);
+    return saveOperation;
+}
+
+async function getSelectionCursor(username) {
     const normalizedUsername = normalizeUsername(username);
     if (!selectionCursors[normalizedUsername]) {
         selectionCursors[normalizedUsername] = { nextRow: 2, pendingRow: null, pendingProjectId: "" };
-        saveSelectionCursors();
+        await saveSelectionCursors();
     }
     return selectionCursors[normalizedUsername];
 }
@@ -1543,7 +1573,7 @@ async function selectProject_ABD(userInfo) {
         const profile = await getUserProfile(username);
         const planBidSettings = normalizePlanBidSettings(userInfo.planBidSettings);
         const feasibilitySettings = normalizeFeasibilitySettings(userInfo.planBidSettings);
-        const cursor = getSelectionCursor(username);
+        const cursor = await getSelectionCursor(username);
 
         if (cursor.pendingRow !== null) {
             const [pendingProject] = await readSheetRowsRange(
@@ -1605,7 +1635,7 @@ async function selectProject_ABD(userInfo) {
             cursor.pendingRow = null;
             cursor.pendingProjectId = "";
             pendingProposalsByUser.delete(normalizeUsername(username));
-            saveSelectionCursors();
+            await saveSelectionCursors();
         }
 
         while (cursor.nextRow <= apiProjectsLastRow) {
@@ -1642,7 +1672,7 @@ async function selectProject_ABD(userInfo) {
                         statusReason: ageSkipReason,
                     });
                     cursor.nextRow = rowNumber + 1;
-                    saveSelectionCursors();
+                    await saveSelectionCursors();
                     continue;
                 }
 
@@ -1655,7 +1685,7 @@ async function selectProject_ABD(userInfo) {
                         statusReason: getPlanBidSkipReason(project),
                     });
                     cursor.nextRow = rowNumber + 1;
-                    saveSelectionCursors();
+                    await saveSelectionCursors();
                     continue;
                 }
 
@@ -1673,7 +1703,7 @@ async function selectProject_ABD(userInfo) {
                                 : ""),
                     });
                     cursor.nextRow = rowNumber + 1;
-                    saveSelectionCursors();
+                    await saveSelectionCursors();
                     continue;
                 }
 
@@ -1699,7 +1729,7 @@ async function selectProject_ABD(userInfo) {
                         console.log(
                             `Project ${project.id} was below the feasibility threshold: ${assessment.score}.`
                         );
-                        saveSelectionCursors();
+                        await saveSelectionCursors();
                         continue;
                     }
                     project.FeasibilityScore = assessment.score;
@@ -1709,7 +1739,7 @@ async function selectProject_ABD(userInfo) {
                         cursor.nextRow = rowNumber + 1;
                         cursor.pendingRow = null;
                         cursor.pendingProjectId = "";
-                        saveSelectionCursors();
+                        await saveSelectionCursors();
                         continue;
                     }
                     cursor.nextRow = rowNumber + 1;
@@ -1717,20 +1747,20 @@ async function selectProject_ABD(userInfo) {
                     cursor.pendingProjectId = project.id;
                     pendingProposalsByUser.set(normalizeUsername(username), proposal);
                     await appendMyEvents(expiredProjectEvents);
-                    saveSelectionCursors();
+                    await saveSelectionCursors();
                     return proposal;
                 } catch (error) {
                     await appendMyEvents(expiredProjectEvents);
                     releaseProject(normalizeUsername(username), projectIdentity);
                     cursor.nextRow = rowNumber;
-                    saveSelectionCursors();
+                    await saveSelectionCursors();
                     throw error;
                 }
             }
 
             await appendMyEvents(expiredProjectEvents);
             cursor.nextRow = endRow + 1;
-            saveSelectionCursors();
+            await saveSelectionCursors();
         }
         return null;
     });
@@ -1739,7 +1769,6 @@ async function selectProject_ABD(userInfo) {
 async function generateProjectProposal(project, username, profile) {
     const proposal = await proposalMaker(
         project,
-        undefined,
         profile.aboutMe,
         profile.skills,
         profile.prompt,
@@ -1836,7 +1865,7 @@ app.post("/bid_result", async (req, res) => {
             cursor.pendingRow = null;
             cursor.pendingProjectId = "";
             pendingProposalsByUser.delete(normalizeUsername(username));
-            saveSelectionCursors();
+            await saveSelectionCursors();
         }
         releaseProject(normalizeUsername(username), projectId || normalizeProjectHref(attempt.projectUrl));
         bidAttemptsById.delete(attemptId);

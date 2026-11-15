@@ -8,7 +8,6 @@ export const PROPOSAL_MODELS = [
 
 export default async (
     projectInfo,
-    guiderName,
     profileAboutMe = "",
     profileSkills = "",
     profilePrompt = "",
@@ -32,7 +31,6 @@ export default async (
             let tempProjectInfo = Force_BudgetSetter(projectInfo);
             tempProjectInfo = await AI_ProjectThinker(
                 tempProjectInfo,
-                guiderName,
                 model,
                 apiKey,
                 profileAboutMe,

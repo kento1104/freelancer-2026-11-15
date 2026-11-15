@@ -20,8 +20,8 @@ keeps deployment platforms from selecting an incompatible newer runtime.
 3. Create a `My Events` sheet with these headers in row 1:
    `Date/Time`, `Project ID`, `Project URL`, `Account` (or `username`; the
    currently used misspelling `acccount` is also accepted),
-   `Bid Status`, `Status Reason`, `Proposal`. The service account needs permission
-   to append rows.
+   `Bid Status` (or `bid`), `Status Reason`, `Proposal`. The service account needs
+   permission to append rows.
 4. Install dependencies with `npm ci` and start with `npm start`. The server binds to
    `0.0.0.0` and uses the platform-provided `PORT` by default.
 5. Configure `CORS_ORIGINS` for the extension origins if you do not want the default
@@ -36,9 +36,9 @@ service-account file from the repository by default; configure
 `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_SERVICE_ACCOUNT_JSON`, or application
 default credentials instead. Gemini API keys are not server environment variables;
 the server looks them up by username from the `Profile` sheet.
-The proposal-writing prompt comes from the selected profile row's `prompt` column
-(`script` is also accepted); the feasibility evaluator uses `conclusion_AI_key`, and
-proposal generation uses `Gemini_API_key`.
+The proposal-writing prompt comes directly from the selected profile row's `prompt`
+column (`script` is also accepted); no prompt text files are loaded. The feasibility
+evaluator uses `conclusion_AI_key`, and proposal generation uses `Gemini_API_key`.
 
 Plan-bid filters are configured in the Auto Bid extension's options page and sent with
 each `/need_project` request. The defaults preserve the existing country, verification,

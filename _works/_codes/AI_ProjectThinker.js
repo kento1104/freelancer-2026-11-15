@@ -1,15 +1,5 @@
-
-
-import fs from 'fs';
-import path from 'path';
-
-
 import convertStringValuesRecursive from './_toolkit/convertStringValuesRecursive.js';
 import stringToObject from './_toolkit/stringToObject.js';
-import translateText from './_toolkit/translateText.js';
-import getConcatedTextsinFolder from './_toolkit/getConcatedTextsinFolder.js';
-
-
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
@@ -28,53 +18,38 @@ export async function waitForModelRequestSlot(model, apikey) {
     }
 }
 
-function removeBrackets(input) {
-    // Remove all content between '[' and ']' using regex
+export function normalizeProposalText(input) {
+    if (typeof input !== "string" || input.trim() === "") {
+        throw new Error("Gemini response must include a non-empty string ProposalText field.");
+    }
     return input.replace(/\[.*?\]/g, '');
 }
 
-export default async (
+export function normalizeProposalTime(projectType, input) {
+    const time = typeof input === "number"
+        ? input
+        : typeof input === "string" && input.trim() !== ""
+            ? Number(input.trim())
+            : NaN;
+    const unit = projectType === "Fixed" ? "days" : projectType === "Hourly" ? "hours per week" : "";
+
+    if (!unit || !Number.isSafeInteger(time) || time < 1) {
+        throw new Error(
+            `Gemini response must include ProposalTime as a positive whole number of ${unit || "days or hours"}.`
+        );
+    }
+
+    return time;
+}
+
+export function buildProposalPrompt(
     projectInfo,
-    guiderPathName,
-    model,
-    apikey,
     profileAboutMe = "",
     profileSkills = "",
-    profilePrompt = ""
-) => {
-    
-
-    let AI_guider_Directory;
-    let guider_text;
-    let text_prompt;
-
-    try { // Create AI_guider variable and read value from file
-        if(guiderPathName === undefined || guiderPathName === null || guiderPathName === '') {
-            //console.log('guiderPathName is empty, using default path');  
-            const guiderPath = path.join(process.cwd(),'/_works/_documents/AI_guiders'); 
-
-            const subdirectories = fs.readdirSync(guiderPath, { withFileTypes: true })
-                .filter(dirent => dirent.isDirectory())
-                .map(dirent => dirent.name);
-
-            const underscoreDirs = subdirectories.filter(dir => dir.startsWith('_'));
-
-            if (underscoreDirs.length > 0) {
-                AI_guider_Directory = path.join(guiderPath, underscoreDirs[0]);
-            } else if (subdirectories.includes('defaultAI')) {
-                AI_guider_Directory = path.join(guiderPath, 'defaultAI');
-            } else {
-                throw new Error('No valid AI guider directory found.');
-            }   
-        }
-        else{
-            AI_guider_Directory = guiderPathName;
-            //console.log('guiderPathName',AI_guider_Directory);
-        }
-
-        //console.log('AI_guider_Directory',AI_guider_Directory);
-        guider_text = getConcatedTextsinFolder(AI_guider_Directory);
-        text_prompt = `${guider_text}
+    profilePrompt = "",
+) {
+    return `Profile-specific proposal instructions from the profile sheet:
+${profilePrompt}
 
 Freelancer profile "about me":
 ${profileAboutMe}
@@ -82,19 +57,29 @@ ${profileAboutMe}
 Freelancer profile skills:
 ${profileSkills}
 
-Profile-specific proposal instructions:
-${profilePrompt}
-
 JSON string of Project:
 ${JSON.stringify(projectInfo)}
-`;
 
-    } catch (error) {
-        console.log('error',error);
-        return null;
-    } 
-    //console.log('text_prompt', text_prompt);
-     
+Required response format:
+Return only one valid JSON object, without Markdown fences or extra text. It must include:
+{
+  "ProposalText": "A non-empty string containing the complete proposal.",
+  "ProposalTime": 7
+}
+ProposalTime must be a positive whole number only, with no units or other text. For Fixed projects it is the delivery time in days; for Hourly projects it is the weekly limit in hours.
+Do not include or change ProposalBudget; the server calculates it.
+`;
+}
+
+export default async (
+    projectInfo,
+    model,
+    apikey,
+    profileAboutMe = "",
+    profileSkills = "",
+    profilePrompt = ""
+) => {
+    const text_prompt = buildProposalPrompt(projectInfo, profileAboutMe, profileSkills, profilePrompt);
     let result;
     let result_text;
     try {
@@ -118,7 +103,11 @@ ${JSON.stringify(projectInfo)}
         return null;
     }
     //console.log('result_object', result_object);
-    result_object['ProposalText'] = removeBrackets(result_object['ProposalText']);
+    result_object['ProposalText'] = normalizeProposalText(result_object?.ProposalText);
+    result_object['ProposalTime'] = normalizeProposalTime(
+        projectInfo['ProjectType'],
+        result_object?.ProposalTime
+    );
 
     Object.assign(projectInfo, result_object);
     //const prettyJsonString = JSON.stringify(projectInfo, null, 2); 
